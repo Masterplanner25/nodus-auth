@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=80", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nodus-auth"
+version = "0.1.0"
+description = "JWT, API key auth, bcrypt hashing, and scoped principals for AI-native platforms"
+authors = [{ name = "Shawn Knight" }]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["auth", "jwt", "api-key", "bcrypt", "nodus"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "python-jose>=3.5.0",
+  "passlib>=1.7.4",
+  "bcrypt>=4.0.1,<5.0",
+  "pydantic>=2.0.0",
+  "pydantic-settings>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-mock>=3.0"]
+
+[project.urls]
+Homepage = "https://github.com/Masterplanner25/nodus-auth"
+Repository = "https://github.com/Masterplanner25/nodus-auth"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nodus_auth*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
