@@ -6,7 +6,7 @@ principals for AI-native platforms.**
 Standalone auth primitives — no FastAPI required. All core functions work
 with any Python web framework or no framework at all.
 
-> **Status:** v0.1.0 — prepared, not yet published.
+> **Status:** v0.1.0 — published on [PyPI](https://pypi.org/project/nodus-auth/).
 
 ---
 
