@@ -7,6 +7,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Docs
+
+- **Corrected why the HMAC key guard is not redundant with PyJWT's.** 0.2.0 said
+  PyJWT "inspects the key only when it is `bytes`", which is true and
+  incomplete: `_is_der_key` opens with `if not has_crypto: return False`, and
+  `cryptography` is an *extra* of PyJWT, so on a plain `pip install PyJWT` the
+  DER branch of its guard never runs for any key type.
+
+  No behaviour change — the guard here is structural and crypto-free, so it
+  already covered both cases. Found while writing the upstream report, which is
+  the argument for writing one: the explanation had to be good enough for the
+  maintainers of the library it was about.
+
+  `tests/test_pyjwt_backend.py::test_the_guard_does_not_need_cryptography` pins
+  the property that makes it cover the second case.
+
 ---
 
 ## [0.2.0] — 2026-10-08
@@ -67,21 +83,28 @@ second is why the first is not enough on its own.
   ```
 
   **The guard stays after the migration, because PyJWT's fix does not cover the
-  shape this package has.** PyJWT inspects the key only when it is `bytes`.
-  `AuthSettings.SECRET_KEY` is annotated `str`, and the one lossless way DER
-  reaches a `str` is latin-1 — so the bytes PyJWT finally HMACs with are
-  `key.encode("utf-8")`, which no longer parses as DER and sails past its check.
-  Measured on PyJWT 2.15.1:
+  shape this package has.** Two independent reasons, both measured on PyJWT
+  2.15.1:
 
   ```
   jwt.decode(forged, der)                    -> InvalidKeyError  (refused)
   jwt.decode(forged, der.decode("latin-1"))  -> sub='attacker'   (ACCEPTED)
   ```
 
+  `prepare_key` calls `force_bytes`, which is `key.encode("utf-8")` for a
+  `str` — and `AuthSettings.SECRET_KEY` is annotated `str`, reachable from DER
+  only via latin-1. So the bytes PyJWT finally HMACs with no longer parse as
+  DER. PEM and OpenSSH survive that same path only because they are ASCII and
+  the re-encoding is a no-op; DER is the one encoding it destroys.
+
+  And **without PyJWT's `crypto` extra the DER check does not run at all**:
+  `_is_der_key` opens with `if not has_crypto: return False`, so a plain
+  `pip install PyJWT` accepts DER `bytes` as well. We do not require that extra.
+
   An attacker derives those bytes from the public key exactly as
-  deterministically as the server does, and the `str` form is the only way DER
-  gets into this package's configuration — so on its own the upstream fix would
-  have left the reachable path open.
+  deterministically as the server does, and a `str` is the only way DER gets
+  into this package's configuration — so on its own the upstream fix would have
+  left the reachable path open.
 
   **The default configuration was never affected.** `ALGORITHM` defaults to
   `HS256` with a shared secret, `generate_key()` produces random symmetric

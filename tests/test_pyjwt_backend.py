@@ -104,6 +104,53 @@ def test_the_library_also_refuses_der_bytes(der_public):
         pyjwt.encode({"sub": "attacker"}, der_public, algorithm="HS256")
 
 
+def test_the_guard_does_not_need_cryptography(der_public):
+    """Our DER detector must keep working where PyJWT's does not.
+
+    PyJWT's `_is_der_key` opens with `if not has_crypto: return False`, and
+    `cryptography` is an *extra* of PyJWT — so on a plain `pip install PyJWT`
+    the DER branch of its guard never runs for any key type. We do not require
+    that extra either, which is why `_looks_asymmetric` is structural (an ASN.1
+    tag plus a self-consistent length) rather than built on key parsing.
+
+    Checked in a subprocess with `cryptography` made unimportable, because the
+    thing being tested is what happens at *import* time of our own module. The
+    DER bytes are generated here, where `cryptography` is available, and handed
+    over as hex — the subprocess only has to classify them.
+    """
+    import subprocess
+    import textwrap
+
+    program = textwrap.dedent("""
+        import builtins, sys
+        _real = builtins.__import__
+        def _blocked(name, *a, **k):
+            if name == "cryptography" or name.startswith("cryptography."):
+                # ModuleNotFoundError, not ImportError: PyJWT catches the
+                # former, and that is what an absent module actually raises.
+                raise ModuleNotFoundError("blocked for this test")
+            return _real(name, *a, **k)
+        builtins.__import__ = _blocked
+        for mod in [m for m in sys.modules if m.startswith("cryptography")]:
+            del sys.modules[mod]
+
+        from nodus_auth.jwt import _looks_asymmetric
+        der = bytes.fromhex(sys.argv[1])
+        assert _looks_asymmetric(der), "DER bytes slipped past without crypto"
+        assert _looks_asymmetric(der.decode("latin-1")), "DER str slipped past"
+        assert not _looks_asymmetric("an-ordinary-shared-secret-32-bytes!!")
+        print("OK")
+    """)
+    proc = subprocess.run(
+        [sys.executable, "-c", program, der_public.hex()],
+        capture_output=True, text=True, cwd=str(REPO),
+    )
+    assert proc.returncode == 0, (
+        f"guard failed without cryptography:\n{proc.stdout}\n{proc.stderr}"
+    )
+    assert "OK" in proc.stdout
+
+
 def test_the_library_refuses_an_empty_hmac_secret():
     """An unset SECRET_KEY must not silently become a key everyone knows."""
     with pytest.raises(pyjwt.InvalidKeyError):
