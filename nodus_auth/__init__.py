@@ -5,6 +5,7 @@ Core JWT:
     create_access_token  — encode a JWT with configurable expiry
     decode_access_token  — decode + verify a JWT (tries all keys in ring)
     InvalidTokenError    — raised on malformed / expired tokens
+    InsecureKeyError     — raised when an HMAC algorithm is given an asymmetric key
 
 Password:
     hash_password        — bcrypt hash via passlib
@@ -30,7 +31,13 @@ Config:
     AuthSettings         — pydantic-settings for SECRET_KEY, ALGORITHM, expiry
 """
 from .config import AuthSettings
-from .jwt import InvalidTokenError, KeyRing, create_access_token, decode_access_token
+from .jwt import (
+    InsecureKeyError,
+    InvalidTokenError,
+    KeyRing,
+    create_access_token,
+    decode_access_token,
+)
 from .keys import generate_key, hash_key
 from .password import hash_password, verify_password
 from .schemas import AuthPrincipal, LoginRequest, RegisterRequest, Scopes, TokenResponse
@@ -40,6 +47,7 @@ __all__ = [
     # Config
     "AuthSettings",
     # JWT
+    "InsecureKeyError",
     "InvalidTokenError",
     "KeyRing",
     "create_access_token",
