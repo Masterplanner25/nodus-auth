@@ -6,7 +6,12 @@ principals for AI-native platforms.**
 Standalone auth primitives — no FastAPI required. All core functions work
 with any Python web framework or no framework at all.
 
-> **Status:** v0.1.0 — published on [PyPI](https://pypi.org/project/nodus-auth/).
+> **Status:** v0.2.0 — published on [PyPI](https://pypi.org/project/nodus-auth/).
+>
+> **0.1.x is not supported.** It signed and verified through `python-jose`,
+> which carries an unfixed critical advisory (CVE-2026-85394). 0.2.0 moves to
+> `PyJWT>=2.15.1` and refuses asymmetric key material under an HMAC
+> algorithm — see [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -41,7 +46,7 @@ pip install nodus-auth
 ```python
 from nodus_auth import AuthSettings, create_access_token, decode_access_token, InvalidTokenError
 
-settings = AuthSettings(SECRET_KEY="my-secret-key-32-chars-minimum")
+settings = AuthSettings(SECRET_KEY="my-secret-key-at-least-32-bytes-long")
 token = create_access_token({"sub": "user-123"}, settings=settings)
 
 try:
@@ -52,16 +57,36 @@ except InvalidTokenError:
     ...
 ```
 
+### Errors
+
+Every error this package raises subclasses `AuthError`, so one `except` clause
+covers it and you never have to name a type from the JWT library underneath.
+
+| Error | When | Suggested response |
+|---|---|---|
+| `InvalidTokenError` | expired, malformed, or signature failed | 401 |
+| `TokenCreationError` | the token could not be signed — e.g. an unsupported `ALGORITHM` | 500; it is your configuration |
+| `InsecureKeyError` | asymmetric key material supplied for an HMAC algorithm | 500, and fix it before serving — see [SECURITY.md](SECURITY.md) |
+
+`TokenCreationError` and `InsecureKeyError` are deliberately **not**
+`InvalidTokenError`: both mean the server is misconfigured, and answering 401
+would blame the client for an operator's mistake. `InsecureKeyError` in
+particular means every token is forgeable, so it must not be absorbed by a 401
+path.
+
 ### Key rotation
 
 ```python
 from nodus_auth import KeyRing, create_access_token, decode_access_token, AuthSettings
 
-ring = KeyRing(active="key-v1", grace_hours=24)
-settings = AuthSettings(SECRET_KEY="key-v1")
+key_v1 = "first-signing-key-at-least-32-bytes-long"
+key_v2 = "second-signing-key-at-least-32-bytes-long"
+
+ring = KeyRing(active=key_v1, grace_hours=24)
+settings = AuthSettings(SECRET_KEY=key_v1)
 token = create_access_token({"sub": "u1"}, settings=settings, key_ring=ring)
 
-ring.rotate("key-v2")  # tokens signed with key-v1 still verify for 24 hours
+ring.rotate(key_v2)  # tokens signed with key_v1 still verify for 24 hours
 payload = decode_access_token(token, settings=settings, key_ring=ring)  # OK
 ```
 
@@ -152,11 +177,11 @@ parse_user_ids(["uid-1", "bad", "uid-2"])              # → [UUID, UUID]  (skip
 
 | Package | Version | Purpose |
 |---|---|---|
-| `python-jose` | ≥3.5.0 | JWT encoding/decoding |
+| `PyJWT` | ≥2.15.1 | JWT encoding/decoding (floor is security-relevant — see SECURITY.md) |
 | `passlib` | ≥1.7.4 | bcrypt password context |
 | `bcrypt` | ≥4.0.1,<5.0 | bcrypt backend (passlib 1.7.4 incompatible with 5.x) |
 | `pydantic` | ≥2.0.0 | Schemas |
-| `pydantic-settings` | ≥2.0.0 | `AuthSettings` from env vars |
+| `pydantic-settings` | ≥2.14.2 | `AuthSettings` from env vars |
 
 ---
 

@@ -6,22 +6,48 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from jose import JWTError, jwt as _jwt
+# `jwt` here is PyJWT, not this module: Python 3 resolves imports absolutely, so
+# a module named `nodus_auth.jwt` importing `jwt` gets the top-level package.
+# Pinned by `test_pyjwt_backend.py::test_the_backend_is_pyjwt_not_this_module`,
+# because the day that stops being true the failure is a bewildering one.
+import jwt as _jwt
+from jwt import PyJWTError
 
 from .config import AuthSettings
 
 
-class InvalidTokenError(Exception):
+class AuthError(Exception):
+    """Base for every error this package raises.
+
+    Added with the move off python-jose (#1). Before it, a caller had to catch
+    `InvalidTokenError` *and* whatever the JWT library happened to raise from the
+    signing path, which meant importing that library to name its exceptions —
+    coupling the caller to a dependency this package has now changed once and
+    may change again.
+    """
+
+
+class InvalidTokenError(AuthError):
     """Raised when a JWT cannot be decoded, is expired, or fails verification."""
 
 
-class InsecureKeyError(Exception):
+class TokenCreationError(AuthError):
+    """Raised when a token cannot be signed — almost always a misconfiguration.
+
+    Separate from `InvalidTokenError` because the two call for opposite
+    responses: an invalid token is a 401 for the caller, while a token that
+    cannot be *created* is the server's own setup being wrong, and answering 401
+    to it would blame the client for an operator's mistake.
+    """
+
+
+class InsecureKeyError(AuthError):
     """Raised when asymmetric key material is supplied for an HMAC algorithm.
 
     Deliberately **not** an `InvalidTokenError`. A caller treats an invalid token
     as a 401 and carries on; this is a misconfiguration that makes every token
     forgeable, so it has to be loud — and it must not be swallowed by the
-    key-ring loop in `decode_access_token`, which catches `JWTError`.
+    key-ring loop in `decode_access_token`, which catches the library's error.
     """
 
 
@@ -57,8 +83,9 @@ def _is_der_sequence(raw: bytes) -> bool:
 def _looks_asymmetric(key: object) -> bool:
     """Is *key* an RSA/EC/Ed25519 key rather than a shared secret?
 
-    Structural, because `cryptography` is only an *extra* of python-jose and so
-    cannot be imported here — a guard that needs an optional dependency is a
+    Structural, because `cryptography` is an *extra* of the JWT library rather
+    than a dependency of it — true of PyJWT as it was of python-jose — so it
+    cannot be imported here. A guard that needs an optional dependency is a
     guard that is absent exactly where someone installed the lean set.
     """
     if hasattr(key, "public_bytes") or hasattr(key, "private_bytes"):
@@ -91,30 +118,43 @@ def _looks_asymmetric(key: object) -> bool:
 
 
 def _require_secret_for_hmac(key: object, algorithm: str) -> None:
-    """Refuse asymmetric key material under an HMAC algorithm (CVE-2026-85394).
+    """Refuse asymmetric key material under an HMAC algorithm.
 
-    **python-jose does not do this reliably, and no release does.** Its 3.4.0
-    guard (for CVE-2024-33663) rejects PEM and OpenSSH public keys used as HMAC
-    secrets and **misses DER**, which CVE-2026-85394 records as a bypass with
-    `last_affected: 3.5.0` and no fixed version — 3.5.0 being the newest release.
+    An HMAC algorithm uses whatever key it is handed as the shared secret. Hand
+    it a **public** key and every token becomes forgeable by anyone holding that
+    key, which is everyone. Both JWT libraries this package has used shipped a
+    guard against it and both shipped a bypass of their own guard:
 
-    Reproduced on 3.5.0: signing *and* verifying `HS256` with a DER-encoded RSA
-    **public** key is accepted, so anyone holding the public key — which is
-    public — can mint a token for any subject.
+    - python-jose 3.4.0 guarded PEM and OpenSSH and **missed DER** —
+      CVE-2026-85394, `last_affected: 3.5.0`, **no fixed release**.
+    - PyJWT had the identical DER bypass (CVE-2026-102271) and fixed it in
+      2.14.0, which is part of why `>=2.15.1` is the floor.
 
-    Called from **both** sites that hand a key to jose, sign and verify, because
-    "a correct check on one of two paths" is the shape this ecosystem keeps
-    re-learning. The signing side is not attacker-reachable, but refusing there
-    turns the same misconfiguration into an error at setup rather than a silent
-    forgery later.
+    **The guard stays because PyJWT's fix does not cover the shape this package
+    has.** PyJWT inspects the key only when it is `bytes`. `AuthSettings.
+    SECRET_KEY` is annotated `str`, and the one lossless way DER reaches a `str`
+    is latin-1 — so the bytes PyJWT finally HMACs with are
+    `key.encode("utf-8")`, which no longer parses as DER and sails past its
+    check. Measured on PyJWT 2.15.1, not inferred: the DER *bytes* are refused
+    (`InvalidKeyError`), and the latin-1 `str` carrying the same public key is
+    **accepted**, because an attacker derives `key.encode("utf-8")` from the
+    public key just as deterministically as the server does. That is the only
+    way DER gets into this package's configuration, so on its own the upstream
+    fix would leave the reachable path open.
+
+    Called from **both** sites that hand a key to the library, sign and verify,
+    because "a correct check on one of two paths" is the shape this ecosystem
+    keeps re-learning. The signing side is not attacker-reachable, but refusing
+    there turns the same misconfiguration into an error at setup rather than a
+    silent forgery later.
     """
     if algorithm in _HMAC_ALGORITHMS and _looks_asymmetric(key):
         raise InsecureKeyError(
             f"{algorithm} is an HMAC algorithm and needs a shared secret, but the "
-            f"key supplied is asymmetric key material (RSA/EC/Ed25519). "
-            f"python-jose would use it as the HMAC secret, and a public key is "
-            f"public, so every token would be forgeable (CVE-2026-85394, which "
-            f"has no fixed release). Use a random secret for HS* — see "
+            f"key supplied is asymmetric key material (RSA/EC/Ed25519). It would "
+            f"be used as the HMAC secret, and a public key is public, so every "
+            f"token would be forgeable (CVE-2026-85394 in python-jose, "
+            f"CVE-2026-102271 in PyJWT). Use a random secret for HS* — see "
             f"generate_key() — or an asymmetric algorithm such as RS256 for a "
             f"keypair."
         )
@@ -209,7 +249,26 @@ def create_access_token(
     )
     to_encode["exp"] = expire
     _require_secret_for_hmac(signing_key, cfg.ALGORITHM)
-    return _jwt.encode(to_encode, signing_key, algorithm=cfg.ALGORITHM)
+    try:
+        return _jwt.encode(to_encode, signing_key, algorithm=cfg.ALGORITHM)
+    except (PyJWTError, NotImplementedError) as exc:
+        # The signing path used to let the library's own exception through, so a
+        # caller wanting to handle it had to name a type from a dependency this
+        # package has now changed once. Wrapping it is what makes the backend an
+        # implementation detail rather than part of the contract.
+        #
+        # `NotImplementedError` is in the tuple because it is what PyJWT raises
+        # for an unsupported ALGORITHM -- the single most likely misconfiguration
+        # here -- and it is **not** a `PyJWTError`. Caught by running it; a
+        # `PyJWTError`-only clause reads as complete and misses the main case.
+        #
+        # A `TypeError` from an unserializable claim is deliberately left to
+        # propagate: that is the caller's payload, not the server's setup, and
+        # reporting it as a creation failure would send an operator to inspect a
+        # configuration that is fine.
+        raise TokenCreationError(
+            f"Could not sign a token with algorithm {cfg.ALGORITHM!r}: {exc}"
+        ) from exc
 
 
 def decode_access_token(
@@ -238,6 +297,6 @@ def decode_access_token(
         _require_secret_for_hmac(key, cfg.ALGORITHM)
         try:
             return _jwt.decode(token, key, algorithms=[cfg.ALGORITHM])
-        except JWTError as exc:
+        except PyJWTError as exc:
             last_exc = exc
     raise InvalidTokenError("Invalid or expired token") from last_exc

@@ -14,9 +14,17 @@ from nodus_auth import (
 )
 
 
+# Padded past 32 bytes so PyJWT does not emit `InsecureKeyLengthWarning`
+# (RFC 7518 §3.2) on every call. These are test keys and their length means
+# nothing to what is being tested -- but a suite that prints fifteen warnings
+# it intends to ignore is how people learn to ignore the warning.
+_KEY_A = "key-A-padded-past-thirty-two-bytes-aaaa"
+_KEY_B = "key-B-padded-past-thirty-two-bytes-bbbb"
+
+
 @pytest.fixture
 def settings():
-    return AuthSettings(SECRET_KEY="test-secret-key")
+    return AuthSettings(SECRET_KEY="test-secret-key-padded-past-32-bytes")
 
 
 # ── create / decode round-trip ────────────────────────────────────────────────
@@ -43,7 +51,7 @@ def test_expired_token_raises(settings):
 
 def test_wrong_key_raises(settings):
     token = create_access_token({"sub": "u1"}, settings=settings)
-    wrong = AuthSettings(SECRET_KEY="completely-different-key")
+    wrong = AuthSettings(SECRET_KEY="completely-different-key-also-32-plus")
     with pytest.raises(InvalidTokenError):
         decode_access_token(token, settings=wrong)
 
@@ -67,20 +75,20 @@ def test_key_ring_grace_period(settings):
     # Mint token with old key
     token = create_access_token({"sub": "u1"}, settings=settings, key_ring=ring)
     # Rotate to new key
-    ring.rotate("new-secret-key")
+    ring.rotate("new-secret-key-padded-past-32-bytes-x")
     # Token signed with old key still verifiable during grace period
     payload = decode_access_token(token, settings=settings, key_ring=ring)
     assert payload["sub"] == "u1"
 
 
 def test_key_ring_expired_previous_key_rejected():
-    ring = KeyRing(active="key-A", grace_hours=0)
-    cfg = AuthSettings(SECRET_KEY="key-A")
+    ring = KeyRing(active=_KEY_A, grace_hours=0)
+    cfg = AuthSettings(SECRET_KEY=_KEY_A)
     token = create_access_token({"sub": "u1"}, settings=cfg, key_ring=ring)
-    ring.rotate("key-B")
+    ring.rotate(_KEY_B)
     # grace_hours=0 means previous expires immediately; wait for it
     time.sleep(0.01)
-    cfg_b = AuthSettings(SECRET_KEY="key-B")
+    cfg_b = AuthSettings(SECRET_KEY=_KEY_B)
     with pytest.raises(InvalidTokenError):
         decode_access_token(token, settings=cfg_b, key_ring=ring)
 

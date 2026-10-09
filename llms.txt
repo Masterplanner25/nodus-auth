@@ -4,16 +4,21 @@
 > Part of the [Masterplan Infinite Weave](https://www.the-master-plan.com/) ecosystem.
 > Created by Shawn Knight.
 
-**Notes:** Depends on python-jose, passlib, bcrypt<5.0, pydantic.
+**Notes:** Depends on PyJWT>=2.15.1 (the floor is security-relevant -- see
+SECURITY.md), passlib, bcrypt<5.0, pydantic, pydantic-settings>=2.14.2.
 
 ## Status
 
-v0.1.0 — prepared, not yet published. All GitHub repos aligned at github.com/Masterplanner25.
+v0.2.0 — published on PyPI. All GitHub repos aligned at github.com/Masterplanner25.
+
+0.2.0 moved the JWT backend from python-jose (critical advisory, no fixed
+release) to PyJWT>=2.15.1, and refuses asymmetric key material under an HMAC
+algorithm. 0.1.x is not supported.
 
 ## Install
 
 ```
-pip install nodus-auth  # once published
+pip install nodus-auth
 pip install -e . --no-deps  # dev install
 ```
 

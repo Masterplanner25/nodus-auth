@@ -7,44 +7,95 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.2.0] — 2026-10-08
+
+The JWT backend moved from `python-jose` to `PyJWT`, and an HMAC algorithm now
+refuses asymmetric key material. Both halves are about one attack, and the
+second is why the first is not enough on its own.
+
+### Changed
+
+- **The JWT backend is now `PyJWT>=2.15.1`; `python-jose` is gone.**
+
+  `python-jose` carries **CVE-2026-85394 / GHSA-3qf3-8w2g-rqmx (CRITICAL)** with
+  `last_affected: 3.5.0` and **no fixed release** — 3.5.0 being its newest
+  release and its last, 2025-05-28. There was nowhere to upgrade to.
+
+  The argument for PyJWT is not that it is safer by design. **It shipped the
+  identical bug** — CVE-2026-102271, a DER-encoded public key accepted as an
+  HMAC secret, bypassing its own CVE-2022-29217 guard — and **fixed it in
+  2.14.0.** Same class of mistake; one project shipped the fix.
+
+  The honest counterweight: PyJWT has far more advisories than python-jose, most
+  of the recent ones in `PyJWKClient` / JWK-set handling — remote JWKS fetching,
+  SSRF, malformed JWK parsing — **none of which this package touches.** It uses
+  one import and two calls with a static key and no JWKS. Every one of those
+  advisories is fixed in 2.15.1; python-jose's critical is fixed in nothing.
+
+  **So the floor carries the safety and has to keep moving.** `>=2.14.0` for the
+  DER bypass, `>=2.15.0` for CVE-2026-102275 and CVE-2026-101918. It is
+  `>=2.15.1`, and `tests/test_pyjwt_backend.py` asserts the *behaviours* the
+  floor buys rather than the version string, so lowering it goes red.
+
+  **For callers, this is source-compatible unless you caught a `jose`
+  exception.** `create_access_token` and `decode_access_token` keep their
+  signatures and return types, and `decode_access_token` still raises
+  `InvalidTokenError`. See the new `AuthError` below for the sign path.
+
+- **Default `SECRET_KEY` lengthened to 49 bytes.** It was 31 — one byte under
+  RFC 7518 §3.2's 32-byte floor for SHA-256 — so PyJWT emitted
+  `InsecureKeyLengthWarning` on every call in development. A warning that fires
+  constantly on a value nobody is meant to keep trains people to ignore the
+  warning. Only affects deployments that never set `SECRET_KEY`, which were
+  already signing with a published constant.
+
 ### Security
 
 - **An HMAC algorithm now refuses asymmetric key material
-  (`InsecureKeyError`).** python-jose uses whatever key it is handed as the HMAC
-  secret. Its 3.4.0 guard — added for CVE-2024-33663 — rejects PEM and OpenSSH
-  public keys used that way and **misses DER**. That bypass is
-  **CVE-2026-85394 / GHSA-3qf3-8w2g-rqmx (CRITICAL)**, recorded with
-  `last_affected: 3.5.0` and **no fixed release**; 3.5.0 is the newest python-jose
-  on PyPI, so there is nowhere to upgrade to.
+  (`InsecureKeyError`), at both the signing and the verifying call site.**
 
-  Reproduced against python-jose 3.5.0 before this change — a DER-encoded RSA
-  **public** key used as an `HS256` secret was accepted on both sign and verify,
-  and through this package:
+  An HMAC algorithm uses whatever key it is handed as the shared secret. Hand it
+  a **public** key and every token is forgeable by anyone holding that key,
+  which for a public key is everyone. Reproduced against python-jose 3.5.0
+  before the guard existed:
 
   ```
   decode_access_token(forged, key_ring=KeyRing(active=der_public_key))
     -> sub='attacker'
   ```
 
-  A public key is public, so under that configuration anyone could mint a token
-  for any subject. `nodus-auth` now performs the check python-jose cannot be
-  relied on for, at **both** sites that hand a key to jose.
+  **The guard stays after the migration, because PyJWT's fix does not cover the
+  shape this package has.** PyJWT inspects the key only when it is `bytes`.
+  `AuthSettings.SECRET_KEY` is annotated `str`, and the one lossless way DER
+  reaches a `str` is latin-1 — so the bytes PyJWT finally HMACs with are
+  `key.encode("utf-8")`, which no longer parses as DER and sails past its check.
+  Measured on PyJWT 2.15.1:
+
+  ```
+  jwt.decode(forged, der)                    -> InvalidKeyError  (refused)
+  jwt.decode(forged, der.decode("latin-1"))  -> sub='attacker'   (ACCEPTED)
+  ```
+
+  An attacker derives those bytes from the public key exactly as
+  deterministically as the server does, and the `str` form is the only way DER
+  gets into this package's configuration — so on its own the upstream fix would
+  have left the reachable path open.
 
   **The default configuration was never affected.** `ALGORITHM` defaults to
   `HS256` with a shared secret, `generate_key()` produces random symmetric
-  secrets, and every decode already passed an explicit single-algorithm
-  allowlist (`algorithms=[ALGORITHM]`) — so `alg: none` and algorithm
-  *substitution* were already rejected, verified by test. The reachable path was
-  a deployer supplying asymmetric key material as the verification key, which
+  secrets, and every decode passes an explicit single-algorithm allowlist
+  (`algorithms=[ALGORITHM]`) — so `alg: none` and algorithm *substitution* were
+  already rejected, verified by test. The reachable path was a deployer
+  supplying asymmetric key material as the verification key, which
   `KeyRing(active=...)` accepted because its `str` annotation is not enforced.
 
   `InsecureKeyError` is deliberately **not** an `InvalidTokenError`: a caller
   treats an invalid token as a 401 and carries on, and this is a
-  misconfiguration that makes every token forgeable, so it must not be absorbed
-  by the key-ring loop.
-
-  An asymmetric algorithm with a keypair (`RS256` and a PEM) is the correct
-  setup and is untouched — the check keys off the algorithm, not the key.
+  misconfiguration that makes every token forgeable. An asymmetric algorithm
+  with a keypair (`RS256` and a PEM) is the correct setup and is untouched — the
+  check keys off the algorithm, not the key.
 
 - **`pydantic-settings` floor raised to `>=2.14.2`** for **CVE-2026-58203 /
   GHSA-4xgf-cpjx-pc3j (MODERATE)**: `NestedSecretsSettingsSource` followed
@@ -55,20 +106,47 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checkout had installed**, so the exposure was real rather than theoretical.
 
   The other four python-jose advisories (CVE-2024-33663, CVE-2024-33664,
-  CVE-2024-29370, CVE-2016-7036) are all excluded by the existing `>=3.5.0`
-  floor; each was fixed in 3.4.0 or earlier.
+  CVE-2024-29370, CVE-2016-7036) were all excluded by the old `>=3.5.0` floor
+  and are moot now that the dependency is gone.
 
 ### Added
 
-- `InsecureKeyError`, exported from the package root.
-- `tests/test_hmac_key_guard.py` — 23 tests. The **false-positive** half is the
-  larger one: `0x30` is the DER SEQUENCE tag and also ASCII `"0"`, so a
-  first-byte check would refuse a secret beginning with that character, and
-  refusing a legitimate secret breaks a working deployment. The detector
-  requires a self-consistent ASN.1 length covering the whole buffer, and those
-  tests are what hold it there — verified by neutering the check to its naive
-  form, which fails exactly them.
+- **`AuthError`**, the base for every error this package raises, and
+  **`TokenCreationError`** for a token that cannot be signed. Both exported from
+  the package root.
 
+  `create_access_token` used to let the JWT library's own exception through — so
+  a caller wanting to handle a bad `ALGORITHM` had to import that library and
+  name a type from it. `decode_access_token` wrapped its errors and the sign
+  path did not, which is a check on one of two paths. `AuthError` is now the
+  whole contract and the backend is an implementation detail.
+
+  `TokenCreationError` is **not** an `InvalidTokenError`: a token that cannot be
+  created is the server's setup being wrong, and answering 401 to it would blame
+  the client for an operator's mistake.
+
+  A `TypeError` from an unserializable claim still propagates, deliberately —
+  that is the caller's payload, not the server's configuration.
+
+- `InsecureKeyError`, exported from the package root.
+- `tests/test_hmac_key_guard.py` — the attack is forged by hand with `hmac`,
+  because neither library will produce it any more and borrowing one to build it
+  would make the file assert a library's willingness to help rather than our
+  refusal to accept. The **false-positive** half is the larger one: `0x30` is
+  the DER SEQUENCE tag and also ASCII `"0"`, so a first-byte check would refuse
+  a secret beginning with that character, and refusing a legitimate secret
+  breaks a working deployment. The detector requires a self-consistent ASN.1
+  length covering the whole buffer.
+- `tests/test_pyjwt_backend.py` — that the backend is PyJWT and not this
+  same-named module, that python-jose is no longer declared, and one behaviour
+  per protection the floor buys.
+
+  Ten decisions in this release were verified by breaking each one in turn and
+  checking the right tests went red. One did not: making `InsecureKeyError` a
+  subclass of `InvalidTokenError` left all 75 tests green, because
+  `pytest.raises(InsecureKeyError)` passes either way — so the thing that error
+  exists for was never actually asserted. The hierarchy is checked explicitly
+  now.
 
 ---
 

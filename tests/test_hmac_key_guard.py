@@ -1,17 +1,31 @@
-"""An HMAC algorithm refuses asymmetric key material (CVE-2026-85394).
+"""An HMAC algorithm refuses asymmetric key material.
 
-python-jose uses whatever key it is given as the HMAC secret. Its 3.4.0 guard
-(for CVE-2024-33663) rejects PEM and OpenSSH public keys used that way and
-**misses DER** — CVE-2026-85394, `last_affected: 3.5.0`, **no fixed release**,
-3.5.0 being the newest. A public key is public, so under that configuration
-anyone can mint a token for any subject.
+An HMAC algorithm uses whatever key it is handed as the shared secret, so a
+**public** key makes every token forgeable by anyone holding it — which, for a
+public key, is everyone. Both JWT libraries this package has used guarded
+against that and both shipped a bypass of their own guard: python-jose missed
+DER (CVE-2026-85394, no fixed release), and PyJWT had the identical DER bypass
+(CVE-2026-102271) and fixed it in 2.14.0.
 
-Reproduced on python-jose 3.5.0 before the guard existed:
+**The guard stays on PyJWT because PyJWT's fix does not cover the shape this
+package has.** PyJWT inspects the key only as `bytes`; `AuthSettings.SECRET_KEY`
+is a `str`, and the one lossless way DER reaches a `str` is latin-1, so what
+PyJWT finally HMACs with is `key.encode("utf-8")` — no longer DER, and past its
+check. Measured on 2.15.1:
 
-    jwt.decode(forged, der_public_key, algorithms=["HS256"])  -> accepted
-    decode_access_token(forged, key_ring=KeyRing(active=der)) -> sub='attacker'
+    jwt.decode(forged, der)                   -> InvalidKeyError   (refused)
+    jwt.decode(forged, der.decode("latin-1")) -> sub='attacker'    (ACCEPTED)
 
-So this package does the check python-jose cannot be relied on for.
+An attacker derives those same bytes from the public key exactly as
+deterministically as the server does, so the str form is the reachable path —
+and it is the only way DER gets into this package's configuration.
+
+**The attack is forged by hand here, with `hmac`.** It used to be built by
+asking python-jose to sign with a DER key, which it would. Neither library will
+now, so borrowing one to build the attack would make this file assert a
+library's willingness to help rather than our refusal to accept — and an
+attacker does not use our dependencies. `test_the_forgery_helper_really_forges`
+is the control that keeps the hand-rolled token honest.
 
 **The false-positive tests matter more than the exploit test.** Refusing a
 legitimate secret breaks a working deployment, which for almost every user is
@@ -22,23 +36,44 @@ the adversarial cases below are what hold it to that.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import os
 import secrets
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
-from jose import jwt as jose_jwt
 
 from nodus_auth import (
     AuthSettings,
     InsecureKeyError,
+    InvalidTokenError,
     KeyRing,
     create_access_token,
     decode_access_token,
     generate_key,
 )
 from nodus_auth.jwt import _looks_asymmetric
+
+
+def _forge_hs256(claims: dict, key: bytes) -> str:
+    """Mint an HS256 token with *key* as the HMAC secret, without a JWT library.
+
+    Twelve lines of `hmac`, which is the point: no library has to agree to
+    produce the attack for the attack to exist.
+    """
+    def seg(raw: bytes) -> bytes:
+        return base64.urlsafe_b64encode(raw).rstrip(b"=")
+
+    header = seg(json.dumps({"alg": "HS256", "typ": "JWT"},
+                            separators=(",", ":")).encode())
+    payload = seg(json.dumps(claims, separators=(",", ":")).encode())
+    signing_input = header + b"." + payload
+    signature = seg(hmac.new(key, signing_input, hashlib.sha256).digest())
+    return (signing_input + b"." + signature).decode()
 
 
 @pytest.fixture(scope="module")
@@ -59,15 +94,52 @@ def _der_public(key):
 
 # closes: CVE-2026-85394
 def test_a_der_public_key_is_refused_on_verify(rsa_key):
-    """The reproduced forgery. Without the guard this returns sub='attacker'."""
+    """The reproduced forgery, with the key as `bytes`.
+
+    PyJWT refuses this one too (`InvalidKeyError`, fixed in 2.14.0), so what the
+    assertion pins is that *our* guard answers first and answers with something
+    a caller cannot mistake for a bad token. Remove the guard and this raises
+    `InvalidTokenError` instead — the key ring absorbs the library's error.
+    """
     der = _der_public(rsa_key)
-    forged = jose_jwt.encode({"sub": "attacker"}, der, algorithm="HS256")
+    forged = _forge_hs256({"sub": "attacker"}, der)
     with pytest.raises(InsecureKeyError):
         decode_access_token(forged, key_ring=KeyRing(active=der))
 
 
+def test_a_der_public_key_as_a_str_is_refused_on_verify(rsa_key):
+    """The reachable path, and the one PyJWT 2.15.1 still accepts.
+
+    `SECRET_KEY` is a `str`, so DER arrives latin-1-decoded and PyJWT's check —
+    which looks at `bytes` — never sees DER at all. Measured: without this guard
+    the decode below returns `sub='attacker'`. This is the test that justifies
+    keeping ~40 lines of guard after migrating to a maintained library.
+    """
+    key_str = _der_public(rsa_key).decode("latin-1")
+    forged = _forge_hs256({"sub": "attacker"}, key_str.encode("utf-8"))
+    with pytest.raises(InsecureKeyError):
+        decode_access_token(forged, settings=AuthSettings(
+            SECRET_KEY=key_str, ALGORITHM="HS256"))
+    with pytest.raises(InsecureKeyError):
+        decode_access_token(forged, key_ring=KeyRing(active=key_str))
+
+
+def test_the_forgery_helper_really_forges():
+    """Control for the exploit tests: `_forge_hs256` makes a *valid* token.
+
+    Without it those tests pass on a helper that emits garbage — any refusal
+    satisfies `pytest.raises`, including a refusal for being malformed, which
+    would say nothing about the guard. Here the same helper and a legitimate
+    secret produce a token the real decode path accepts.
+    """
+    _, secret = generate_key()
+    token = _forge_hs256({"sub": "alice", "tv": 0}, secret.encode("utf-8"))
+    cfg = AuthSettings(SECRET_KEY=secret, ALGORITHM="HS256")
+    assert decode_access_token(token, settings=cfg)["sub"] == "alice"
+
+
 def test_a_der_public_key_is_refused_on_sign(rsa_key):
-    """Both sites that hand a key to jose, not just the exploitable one.
+    """Both sites that hand a key to the library, not just the exploitable one.
 
     Signing is not attacker-reachable, but refusing here turns the same
     misconfiguration into an error at setup rather than a silent forgery later.
@@ -81,14 +153,29 @@ def test_a_der_public_key_is_refused_on_sign(rsa_key):
 def test_the_refusal_is_not_an_invalid_token(rsa_key):
     """It must not be absorbed as 'this key did not verify'.
 
-    `decode_access_token` loops the key ring catching `JWTError` and raises
-    `InvalidTokenError` at the end. A caller treats that as a 401 and carries on;
-    a forgeable key ring has to stop the request instead.
+    `decode_access_token` loops the key ring catching the library's error and
+    raises `InvalidTokenError` at the end. A caller treats that as a 401 and
+    carries on; a forgeable key ring has to stop the request instead.
     """
     der = _der_public(rsa_key)
-    forged = jose_jwt.encode({"sub": "attacker"}, der, algorithm="HS256")
+    forged = _forge_hs256({"sub": "attacker"}, der)
     with pytest.raises(InsecureKeyError):
         decode_access_token(forged, key_ring=KeyRing(active=der, previous=der))
+
+    # The hierarchy is the assertion, not the raise above. `pytest.raises(
+    # InsecureKeyError)` passes just as happily if this becomes a *kind of*
+    # `InvalidTokenError` -- and then a caller doing
+    #
+    #     except InvalidTokenError: return 401
+    #
+    # answers 401 to a forgeable key ring, which is the single thing this error
+    # exists to prevent. Found by making that change and watching all 75 tests
+    # stay green.
+    assert not issubclass(InsecureKeyError, InvalidTokenError), (
+        "InsecureKeyError must not be catchable as InvalidTokenError: a "
+        "misconfiguration that makes every token forgeable cannot be absorbed "
+        "by a caller's 401 path"
+    )
 
 
 @pytest.mark.parametrize("label", [

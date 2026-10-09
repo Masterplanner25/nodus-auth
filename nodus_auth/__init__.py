@@ -4,7 +4,11 @@ Core JWT:
     KeyRing              — two-slot signing key ring with rotation support
     create_access_token  — encode a JWT with configurable expiry
     decode_access_token  — decode + verify a JWT (tries all keys in ring)
-    InvalidTokenError    — raised on malformed / expired tokens
+
+Errors (all subclasses of AuthError, so one except clause catches the package):
+    AuthError            — base; catch this rather than the JWT library's types
+    InvalidTokenError    — raised on malformed / expired tokens (a 401)
+    TokenCreationError   — raised when a token cannot be signed (a 500)
     InsecureKeyError     — raised when an HMAC algorithm is given an asymmetric key
 
 Password:
@@ -32,9 +36,11 @@ Config:
 """
 from .config import AuthSettings
 from .jwt import (
+    AuthError,
     InsecureKeyError,
     InvalidTokenError,
     KeyRing,
+    TokenCreationError,
     create_access_token,
     decode_access_token,
 )
@@ -47,9 +53,11 @@ __all__ = [
     # Config
     "AuthSettings",
     # JWT
+    "AuthError",
     "InsecureKeyError",
     "InvalidTokenError",
     "KeyRing",
+    "TokenCreationError",
     "create_access_token",
     "decode_access_token",
     # Keys
