@@ -7,18 +7,9 @@ against that and both shipped a bypass of their own guard: python-jose missed
 DER (CVE-2026-85394, no fixed release), and PyJWT had the identical DER bypass
 (CVE-2026-102271) and fixed it in 2.14.0.
 
-**The guard stays on PyJWT because PyJWT's fix does not cover the shape this
-package has.** PyJWT inspects the key only as `bytes`; `AuthSettings.SECRET_KEY`
-is a `str`, and the one lossless way DER reaches a `str` is latin-1, so what
-PyJWT finally HMACs with is `key.encode("utf-8")` — no longer DER, and past its
-check. Measured on 2.15.1:
-
-    jwt.decode(forged, der)                   -> InvalidKeyError   (refused)
-    jwt.decode(forged, der.decode("latin-1")) -> sub='attacker'    (ACCEPTED)
-
-An attacker derives those same bytes from the public key exactly as
-deterministically as the server does, so the str form is the reachable path —
-and it is the only way DER gets into this package's configuration.
+**The guard stays on PyJWT because PyJWT's check does not cover every way this
+package can be handed a key.** Reported privately to PyJWT on 2026-11-04; see
+SECURITY.md.
 
 **The attack is forged by hand here, with `hmac`.** It used to be built by
 asking python-jose to sign with a DER key, which it would. Neither library will
@@ -108,12 +99,10 @@ def test_a_der_public_key_is_refused_on_verify(rsa_key):
 
 
 def test_a_der_public_key_as_a_str_is_refused_on_verify(rsa_key):
-    """The reachable path, and the one PyJWT 2.15.1 still accepts.
+    """`SECRET_KEY` is a `str`, so this is how DER reaches this package's config.
 
-    `SECRET_KEY` is a `str`, so DER arrives latin-1-decoded and PyJWT's check —
-    which looks at `bytes` — never sees DER at all. Measured: without this guard
-    the decode below returns `sub='attacker'`. This is the test that justifies
-    keeping ~40 lines of guard after migrating to a maintained library.
+    This is the test that justifies keeping ~40 lines of guard after migrating
+    to a maintained library.
     """
     key_str = _der_public(rsa_key).decode("latin-1")
     forged = _forge_hs256({"sub": "attacker"}, key_str.encode("utf-8"))

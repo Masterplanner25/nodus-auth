@@ -105,13 +105,11 @@ def test_the_library_also_refuses_der_bytes(der_public):
 
 
 def test_the_guard_does_not_need_cryptography(der_public):
-    """Our DER detector must keep working where PyJWT's does not.
+    """Our DER detector must work without `cryptography` installed.
 
-    PyJWT's `_is_der_key` opens with `if not has_crypto: return False`, and
-    `cryptography` is an *extra* of PyJWT — so on a plain `pip install PyJWT`
-    the DER branch of its guard never runs for any key type. We do not require
-    that extra either, which is why `_looks_asymmetric` is structural (an ASN.1
-    tag plus a self-consistent length) rather than built on key parsing.
+    `cryptography` is an *extra* of PyJWT and we do not require it, which is why
+    `_looks_asymmetric` is structural (an ASN.1 tag plus a self-consistent
+    length) rather than built on key parsing.
 
     Checked in a subprocess with `cryptography` made unimportable, because the
     thing being tested is what happens at *import* time of our own module. The
