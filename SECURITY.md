@@ -36,32 +36,13 @@
   `nodus-auth` refuses it with `InsecureKeyError` at both the signing and the
   verifying call site.
 
-  PyJWT 2.14.0+ refuses it too, but not on either path this package uses.
-  Measured on 2.15.1:
+  PyJWT 2.14.0+ has a check of its own, and this guard is kept because that
+  check does not cover every way this package can be handed a key. The guard is
+  structural (an ASN.1 tag plus a self-consistent length) and needs no optional
+  dependency.
 
-  | key encoding | as `bytes` | as `str` |
-  |---|---|---|
-  | PEM | refused | refused |
-  | OpenSSH | refused | refused |
-  | DER | refused | **accepted** |
-
-  `prepare_key` calls `force_bytes`, which is `key.encode("utf-8")` for a
-  `str` — and `AuthSettings.SECRET_KEY` is a `str`, reached from DER only via
-  latin-1. So the bytes PyJWT finally HMACs with no longer parse as DER. PEM and
-  OpenSSH survive that path only because they are ASCII and the re-encoding is a
-  no-op. An attacker derives those bytes from the public key as deterministically
-  as the server does.
-
-  **And without PyJWT's `crypto` extra the DER check does not run at all** —
-  `_is_der_key` opens with `if not has_crypto: return False`, so a plain
-  `pip install PyJWT` accepts DER `bytes` as well. We do not require that extra,
-  and neither does PyJWT.
-
-  So the guard here is not duplicating an upstream protection; it is the only
-  thing covering either case. It is structural (an ASN.1 tag plus a
-  self-consistent length) rather than crypto-backed, for exactly the reason the
-  second row above exists. Not yet reported upstream; the guard does not depend
-  on the outcome either way.
+  Reported privately to PyJWT on 2026-11-04. The detail will be recorded here
+  once that is resolved; the guard does not depend on the outcome either way.
 
   **What this means for you.** The default configuration — `HS256` with a shared
   secret from `generate_key()` — was never exposed, and every decode passes an
